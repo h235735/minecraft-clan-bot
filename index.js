@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, PermissionFlagsBits, ChannelType, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { Pool } = require('pg');
+const http = require('http');
 require('dotenv').config();
 
 const client = new Client({
@@ -245,6 +246,15 @@ client.on('interactionCreate', async interaction => {
             }
         } catch (err) { console.error(err); return interaction.editReply('❌ Ошибка. Роль бота должна быть ВЫШЕ.'); }
     }
+});
+
+// --- HTTP-ЗАГЛУШКА для Render ---
+const port = process.env.PORT || 8080;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running!');
+}).listen(port, () => {
+    console.log(`HTTP-заглушка слушает порт ${port}`);
 });
 
 client.login(process.env.TOKEN);
