@@ -1,10 +1,20 @@
-const { Client, GatewayIntentBits, PermissionFlagsBits, ChannelType, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const {
+    Client, GatewayIntentBits, PermissionFlagsBits, ChannelType,
+    REST, Routes, SlashCommandBuilder, MessageFlags
+} = require('discord.js');
 const { Pool } = require('pg');
 const http = require('http');
 require('dotenv').config();
 
+const TOKEN = (process.env.TOKEN || '').trim();
+
+// --- ГЛОБАЛЬНАЯ ЗАЩИТА ОТ ПАДЕНИЙ ---
+process.on('unhandledRejection', err => console.error('❌ unhandledRejection:', err));
+process.on('uncaughtException', err => console.error('❌ uncaughtException:', err));
+
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+    rest: { timeout: 30000 }
 });
 
 // --- ПОДКЛЮЧЕНИЕ К POSTGRESQL (SUPABASE) ---
@@ -12,6 +22,7 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
+pool.on('error', err => console.error('❌ Ошибка пула PostgreSQL:', err.message));
 
 async function initDB() {
     try {
@@ -27,7 +38,7 @@ async function initDB() {
         `);
         console.log('✅ Таблица clans готова (PostgreSQL)');
     } catch (err) {
-        console.error('❌ Ошибка инициализации БД:', err);
+        console.error('❌ Ошибка инициализации БД:', err.message);
     }
 }
 
@@ -91,29 +102,37 @@ const commands = [
             ))
 ].map(c => c.toJSON());
 
-client.once('ready', async () => {
-    console.log(`Бот запущен: ${client.user.tag}`);
+// В discord.js >= 14.22 событие называется clientReady (ready помечено устаревшим)
+client.once('clientReady', async () => {
+    console.log(`✅ Бот запущен: ${client.user.tag}`);
     await initDB();
 
-    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN.trim());
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('Слэш-команды обновлены!');
-    } catch (e) { console.error('❌ Ошибка регистрации команд:', e); }
+        console.log('✅ Слэш-команды обновлены!');
+    } catch (e) {
+        console.error('❌ Ошибка регистрации команд:', e.message);
+    }
 });
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, guild, member, user } = interaction;
 
+    if (!guild) {
+        return interaction.reply({ content: '❌ Команды работают только на сервере.', flags: MessageFlags.Ephemeral });
+    }
+
     // --- СОЗДАТЬ КЛАН ---
     if (commandName === 'создатьклан') {
-        await interaction.deferReply({ ephemeral: true });
-        const existing = await getClan(user.id);
-        if (existing) return interaction.editReply('❌ Вы уже создали клан! Сначала `/удалитьклан`.');
-
-        const clanName = interaction.options.getString('название');
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         try {
+            const existing = await getClan(user.id);
+            if (existing) return interaction.editReply('❌ Вы уже создали клан! Сначала `/удалитьклан`.');
+
+            const clanName = interaction.options.getString('название');
+
             const leaderPerms = [
                 PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages,
                 PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages,
@@ -130,7 +149,7 @@ client.on('interactionCreate', async interaction => {
                     { role: officerRole, position: botHighest - 2 },
                     { role: baseRole, position: botHighest - 3 }
                 ]);
-            } catch (e) { console.warn('Позиции ролей:', e.message); }
+            } catch (e) { console.warn('⚠️ Позиции ролей:', e.message); }
 
             await member.roles.add(leaderRole);
             await member.roles.add(baseRole);
@@ -141,8 +160,22 @@ client.on('interactionCreate', async interaction => {
                 permissionOverwrites: [
                     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
                     { id: baseRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-                    { id: officerRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ModerateMembers] },
-                    { id: leaderRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages, PermissionFlagsBits.ManageRoles, PermissionFlagsBits.ModerateMembers] }
+                    {
+                        id: officerRole.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages,
+                            PermissionFlagsBits.ModerateMembers
+                        ]
+                    },
+                    {
+                        id: leaderRole.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages,
+                            PermissionFlagsBits.ManageRoles, PermissionFlagsBits.ModerateMembers
+                        ]
+                    }
                 ]
             });
             await guild.channels.create({ name: 'клановый-чат', type: ChannelType.GuildText, parent: category.id });
@@ -155,17 +188,18 @@ client.on('interactionCreate', async interaction => {
             return interaction.editReply(`✅ Клан **${clanName}** создан! Вы — Лидер.`);
         } catch (err) {
             console.error(err);
-            return interaction.editReply('❌ Ошибка. Проверьте, что роль бота ВЫШЕ всех ролей.');
+            return interaction.editReply('❌ Ошибка. Проверьте, что роль бота ВЫШЕ всех ролей и у неё есть права на управление ролями/каналами.');
         }
     }
 
     // --- ПЕРЕИМЕНОВАТЬ ---
     if (commandName === 'переименоватьклан') {
-        await interaction.deferReply({ ephemeral: true });
-        const myClan = await getClan(user.id);
-        if (!myClan) return interaction.editReply('❌ У вас нет клана.');
-        const newName = interaction.options.getString('новое_название');
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         try {
+            const myClan = await getClan(user.id);
+            if (!myClan) return interaction.editReply('❌ У вас нет клана.');
+            const newName = interaction.options.getString('новое_название');
+
             const category = guild.channels.cache.get(myClan.category_id);
             if (category) await category.setName(`⛺ КЛАН: ${newName.toUpperCase()}`);
             const br = guild.roles.cache.get(myClan.base_role_id); if (br) await br.setName(newName);
@@ -174,15 +208,19 @@ client.on('interactionCreate', async interaction => {
 
             await pool.query('UPDATE clans SET clan_name = $1 WHERE user_id = $2', [newName, user.id]);
             return interaction.editReply(`📝 Клан переименован в **${newName}**!`);
-        } catch (err) { console.error(err); return interaction.editReply('❌ Ошибка переименования.'); }
+        } catch (err) {
+            console.error(err);
+            return interaction.editReply('❌ Ошибка переименования.');
+        }
     }
 
     // --- УДАЛИТЬ ---
     if (commandName === 'удалитьклан') {
-        await interaction.deferReply({ ephemeral: true });
-        const myClan = await getClan(user.id);
-        if (!myClan) return interaction.editReply('❌ У вас нет клана.');
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         try {
+            const myClan = await getClan(user.id);
+            if (!myClan) return interaction.editReply('❌ У вас нет клана.');
+
             const category = guild.channels.cache.get(myClan.category_id);
             if (category) {
                 const children = guild.channels.cache.filter(c => c.parentId === category.id);
@@ -195,7 +233,10 @@ client.on('interactionCreate', async interaction => {
             }
             await deleteClan(user.id);
             return interaction.editReply('🗑️ Клан полностью удалён.');
-        } catch (err) { console.error(err); return interaction.editReply('❌ Ошибка удаления.'); }
+        } catch (err) {
+            console.error(err);
+            return interaction.editReply('❌ Ошибка удаления.');
+        }
     }
 
     // --- УПРАВЛЕНИЕ УЧАСТНИКАМИ ---
@@ -203,21 +244,30 @@ client.on('interactionCreate', async interaction => {
         const target = interaction.options.getMember('игрок');
         const rank = interaction.options.getString('ранг');
 
-        let myClan = null;
-        const allClans = await getAllClans();
-        for (const c of allClans) {
-            if (member.roles.cache.has(c.leader_role_id) || member.roles.cache.has(c.officer_role_id)) {
-                myClan = c; break;
-            }
+        if (!target) {
+            return interaction.reply({ content: '❌ Игрок не найден на сервере.', flags: MessageFlags.Ephemeral });
         }
-        if (!myClan) return interaction.reply({ content: '❌ Вы не Лидер и не Офицер.', ephemeral: true });
+
+        let myClan = null;
+        try {
+            const allClans = await getAllClans();
+            for (const c of allClans) {
+                if (member.roles.cache.has(c.leader_role_id) || member.roles.cache.has(c.officer_role_id)) {
+                    myClan = c; break;
+                }
+            }
+        } catch (err) {
+            console.error(err);
+            return interaction.reply({ content: '❌ Ошибка базы данных.', flags: MessageFlags.Ephemeral });
+        }
+        if (!myClan) return interaction.reply({ content: '❌ Вы не Лидер и не Офицер.', flags: MessageFlags.Ephemeral });
 
         const isLeader = member.roles.cache.has(myClan.leader_role_id);
         const br = guild.roles.cache.get(myClan.base_role_id);
         const or = guild.roles.cache.get(myClan.officer_role_id);
         const lr = guild.roles.cache.get(myClan.leader_role_id);
 
-        if (!br) return interaction.reply({ content: '❌ Роль клана удалена.', ephemeral: true });
+        if (!br) return interaction.reply({ content: '❌ Роль клана удалена.', flags: MessageFlags.Ephemeral });
 
         await interaction.deferReply();
         try {
@@ -227,11 +277,12 @@ client.on('interactionCreate', async interaction => {
             }
             if (rank === 'officer') {
                 if (!isLeader) return interaction.editReply('❌ Только Лидер может назначать Офицеров!');
-                await target.roles.add(br); await target.roles.add(or);
+                await target.roles.add(br);
+                if (or) await target.roles.add(or);
                 return interaction.editReply(`👑 ${target} — Офицер клана **${myClan.clan_name}**.`);
             }
             if (rank === 'mute') {
-                if (target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя замутить Лидера.');
+                if (lr && target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя замутить Лидера.');
                 await target.timeout(60 * 60 * 1000, `Мут от ${user.tag}`);
                 return interaction.editReply(`🔇 ${target} замучен на 1 час.`);
             }
@@ -240,16 +291,30 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply(`🔊 С ${target} снят мут.`);
             }
             if (rank === 'kick') {
-                if (target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя исключить Лидера.');
-                await target.roles.remove(br); if (or) await target.roles.remove(or);
+                if (lr && target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя исключить Лидера.');
+                await target.roles.remove(br);
+                if (or) await target.roles.remove(or);
                 return interaction.editReply(`🚪 ${target} исключён из клана **${myClan.clan_name}**.`);
             }
-        } catch (err) { console.error(err); return interaction.editReply('❌ Ошибка. Роль бота должна быть ВЫШЕ.'); }
+        } catch (err) {
+            console.error(err);
+            return interaction.editReply('❌ Ошибка. Роль бота должна быть ВЫШЕ.');
+        }
     }
 });
 
-// --- ЛОГИРОВАНИЕ ОШИБОК КЛИЕНТА ---
+// --- ЛОГИРОВАНИЕ СОБЫТИЙ КЛИЕНТА (ОТЛАДКА) ---
 client.on('error', err => console.error('❌ Client error:', err));
+client.on('warn', m => console.warn('[WARN]', m));
+client.on('debug', m => {
+    // Токен в debug-логах discord.js скрывается, но на всякий случай фильтруем
+    console.log('[DEBUG]', TOKEN ? m.split(TOKEN).join('***') : m);
+});
+client.on('shardError', e => console.error('[SHARD ERROR]', e));
+client.on('shardDisconnect', (ev, id) => console.error('[SHARD DISCONNECT]', id, 'код:', ev.code));
+client.on('shardReconnecting', id => console.warn('[SHARD RECONNECTING]', id));
+client.rest.on('rateLimited', info => console.warn('[RATE LIMIT]', info));
+client.rest.on('invalidRequestWarning', i => console.warn('[INVALID REQ]', i));
 
 // --- HTTP-ЗАГЛУШКА для Render ---
 const port = process.env.PORT || 8080;
@@ -260,28 +325,35 @@ http.createServer((req, res) => {
     console.log(`HTTP-заглушка слушает порт ${port}`);
 });
 
-// --- ДИАГНОСТИКА И ЛОГИН В DISCORD ---
-const rawToken = process.env.TOKEN || '';
-const cleanToken = rawToken.trim();
-console.log('🔍 TOKEN длина:', rawToken.length, '→ после trim:', cleanToken.length);
-console.log('🔍 TOKEN начинается с', cleanToken.substring(0, 10) + '...');
-console.log('🔍 TOKEN заканчивается на', cleanToken.substring(cleanToken.length - 5));
-console.log('🔍 TOKEN содержит пробелы/переносы?', rawToken !== cleanToken ? 'ДА' : 'НЕТ');
-console.log('🔍 DATABASE_URL начинается с', process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 30) + '...' : 'НЕТ URL');
-console.log('🔍 Попытка входа в Discord...');
+// --- ДИАГНОСТИКА (без утечки секретов) ---
+console.log('🔍 Node:', process.version);
+console.log('🔍 TOKEN задан?', TOKEN ? `ДА (длина ${TOKEN.length})` : 'НЕТ');
+console.log('🔍 TOKEN содержит кавычки?', /["']/.test(TOKEN) ? 'ДА (УБЕРИ ИХ!)' : 'нет');
+console.log('🔍 DATABASE_URL задан?', process.env.DATABASE_URL ? 'ДА' : 'НЕТ');
+
+if (!TOKEN) {
+    console.error('❌ Переменная TOKEN не задана. Добавь её в Environment на Render.');
+    process.exit(1);
+}
+
+// --- ТЕСТ СЕТИ ДО DISCORD ---
+fetch('https://discord.com/api/v10/gateway', { signal: AbortSignal.timeout(10000) })
+    .then(r => console.log('🌐 Gateway HTTP статус:', r.status))
+    .catch(e => console.error('🌐 Нет доступа к Discord:', e.message));
 
 // --- REST-ТЕСТ ТОКЕНА (без WebSocket) ---
-const testRest = new REST({ version: '10' }).setToken(cleanToken);
-testRest.get(Routes.user('@me'))
-    .then(user => console.log('✅ Токен валиден. Бот:', user.username, '| ID:', user.id))
-    .catch(err => console.error('❌ Токен НЕ валиден:', err.message));
+new REST({ version: '10', timeout: 15000 }).setToken(TOKEN)
+    .get(Routes.user('@me'))
+    .then(u => console.log('✅ Токен валиден. Бот:', u.username, '| ID:', u.id))
+    .catch(err => console.error('❌ Токен НЕ валиден / нет ответа:', err.message));
 
 // --- ЛОГИН С ТАЙМАУТОМ ---
+console.log('🔍 Попытка входа в Discord...');
 const loginTimeout = setTimeout(() => {
     console.error('❌ ТАЙМАУТ: client.login() не ответил за 30 секунд');
 }, 30000);
 
-client.login(cleanToken)
+client.login(TOKEN)
     .then(() => {
         clearTimeout(loginTimeout);
         console.log('🔍 client.login() завершился успешно');
