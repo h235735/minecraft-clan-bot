@@ -271,6 +271,23 @@ client.on('interactionCreate', async interaction => {
 
         await interaction.deferReply();
         try {
+            const inMyClan = target.roles.cache.has(br.id);
+            const targetIsLeader = !!lr && target.roles.cache.has(lr.id);
+            const targetIsOfficer = !!or && target.roles.cache.has(or.id);
+
+            if (target.id === user.id) {
+                return interaction.editReply('❌ Нельзя применить команду к самому себе.');
+            }
+
+            // --- Выдача ролей: нельзя переманивать игроков из чужих кланов ---
+            if (rank === 'member' || rank === 'officer') {
+                const others = (await getAllClans()).filter(c => c.user_id !== myClan.user_id);
+                const otherClan = others.find(c => target.roles.cache.has(c.base_role_id));
+                if (otherClan) {
+                    return interaction.editReply(`❌ ${target} уже состоит в клане **${otherClan.clan_name}**.`);
+                }
+            }
+
             if (rank === 'member') {
                 await target.roles.add(br);
                 return interaction.editReply(`✅ ${target} — Боец клана **${myClan.clan_name}**.`);
@@ -281,8 +298,22 @@ client.on('interactionCreate', async interaction => {
                 if (or) await target.roles.add(or);
                 return interaction.editReply(`👑 ${target} — Офицер клана **${myClan.clan_name}**.`);
             }
+
+            // --- Мут / размут / исключение: только участники СВОЕГО клана ---
+            if (!inMyClan) {
+                return interaction.editReply(`❌ ${target} не состоит в вашем клане **${myClan.clan_name}**.`);
+            }
+            if (targetIsLeader) {
+                return interaction.editReply('❌ Нельзя применять это к Лидеру.');
+            }
+            if (targetIsOfficer && !isLeader) {
+                return interaction.editReply('❌ Только Лидер может управлять Офицерами.');
+            }
+
             if (rank === 'mute') {
-                if (lr && target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя замутить Лидера.');
+                if (!target.moderatable) {
+                    return interaction.editReply('❌ Не могу замутить: роль бота ниже или это владелец сервера.');
+                }
                 await target.timeout(60 * 60 * 1000, `Мут от ${user.tag}`);
                 return interaction.editReply(`🔇 ${target} замучен на 1 час.`);
             }
@@ -291,7 +322,6 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply(`🔊 С ${target} снят мут.`);
             }
             if (rank === 'kick') {
-                if (lr && target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя исключить Лидера.');
                 await target.roles.remove(br);
                 if (or) await target.roles.remove(or);
                 return interaction.editReply(`🚪 ${target} исключён из клана **${myClan.clan_name}**.`);
