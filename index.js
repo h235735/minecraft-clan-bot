@@ -41,7 +41,7 @@ const commands = [
         .setDescription('Управление участниками вашего клана (Для Лидеров и Офицеров)')
         .addUserOption(opt => opt.setName('игрок').setDescription('Кого настраиваем?').setRequired(true))
         .addStringOption(opt => opt.setName('ранг')
-            .setDescription('Какую роль присвоить?')
+            .setDescription('Что сделать?')
             .setRequired(true)
             .addChoices(
                 { name: 'Выдать Бойца', value: 'member' },
@@ -80,14 +80,13 @@ client.on('interactionCreate', async interaction => {
         const clanName = interaction.options.getString('название');
 
         try {
-            // Базовые права для роли лидера
             const leaderPerms = [
                 PermissionFlagsBits.ViewChannel,
                 PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ManageChannels,   // создавать/удалять каналы в своей категории
-                PermissionFlagsBits.ManageMessages,   // удалять/закреплять сообщения
-                PermissionFlagsBits.ManageRoles,      // менять роли ниже своей (свои и соклановцев)
-                PermissionFlagsBits.ModerateMembers   // тайм-аут/мут
+                PermissionFlagsBits.ManageChannels,
+                PermissionFlagsBits.ManageMessages,
+                PermissionFlagsBits.ManageRoles,
+                PermissionFlagsBits.ModerateMembers
             ];
 
             const baseRole = await guild.roles.create({
@@ -108,7 +107,7 @@ client.on('interactionCreate', async interaction => {
                 reason: `Создал ${user.tag}`
             });
 
-            // Ставим иерархию: Лидер > Офицер > Боец, все ПОД ролью бота
+            // Иерархия: Лидер > Офицер > Боец, все под ролью бота
             const botHighest = guild.members.me.roles.highest.position;
             try {
                 await guild.roles.setPositions([
@@ -170,7 +169,7 @@ client.on('interactionCreate', async interaction => {
 
             return interaction.editReply(
                 `✅ Ваш клан **${clanName}** создан! Вы — Лидер.\n` +
-                `Теперь вы можете менять права ролей «${clanName}» и «Офицер: ${clanName}» прямо в настройках сервера и мутить участников.`
+                `Теперь вы можете менять права ролей «${clanName}» и «Офицер: ${clanName}» в настройках сервера и мутить участников.`
             );
         } catch (err) {
             console.error(err);
@@ -248,31 +247,41 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // --- 4. УПРАВЛЕНИЕ УЧАСТНИКАМИ ---
+    // --- 4. УПРАВЛЕНИЕ УЧАСТНИКАМИ (поиск по ID, а не по имени) ---
     if (commandName === 'клан') {
         const targetMember = interaction.options.getMember('игрок');
         const rank = interaction.options.getString('ранг');
 
-        const authorRoles = member.roles.cache;
-        const leaderRole = authorRoles.find(r => r.name.startsWith('Лидер: '));
-        const officerRole = authorRoles.find(r => r.name.startsWith('Офицер: '));
-
-        if (!leaderRole && !officerRole) {
-            return interaction.reply({ content: '❌ Вы не Лидер и не Офицер.', ephemeral: true });
+        // Ищем, к какому клану относится автор команды — по ID его ролей
+        let ownerId = null;
+        for (const [id, data] of Object.entries(clanData)) {
+            if (
+                member.roles.cache.has(data.leaderRoleId) ||
+                member.roles.cache.has(data.officerRoleId)
+            ) {
+                ownerId = id;
+                break;
+            }
         }
 
-        const activeClanName = leaderRole
-            ? leaderRole.name.replace('Лидер: ', '')
-            : officerRole.name.replace('Офицер: ', '');
+        if (!ownerId) {
+            return interaction.reply({ content: '❌ Вы не Лидер и не Офицер какого-либо клана.', ephemeral: true });
+        }
 
-        const guildRoles = guild.roles.cache;
-        const clanBaseRole = guildRoles.find(r => r.name === activeClanName);
-        const clanOfficerRole = guildRoles.find(r => r.name === `Офицер: ${activeClanName}`);
-        const clanLeaderRole = guildRoles.find(r => r.name === `Лидер: ${activeClanName}`);
+        const myClan = clanData[ownerId];
+        const isLeader = member.roles.cache.has(myClan.leaderRoleId);
+        const isOfficer = member.roles.cache.has(myClan.officerRoleId);
+
+        const clanBaseRole = guild.roles.cache.get(myClan.baseRoleId);
+        const clanOfficerRole = guild.roles.cache.get(myClan.officerRoleId);
+        const clanLeaderRole = guild.roles.cache.get(myClan.leaderRoleId);
 
         if (!clanBaseRole) {
-            return interaction.reply({ content: '❌ Роли клана не найдены.', ephemeral: true });
+            return interaction.reply({ content: '❌ Основная роль клана была удалена. Обратитесь к администрации.', ephemeral: true });
         }
+
+        // Отображаемое имя клана — из базы бота
+        const activeClanName = myClan.clanName || clanBaseRole.name;
 
         await interaction.deferReply();
 
@@ -283,7 +292,7 @@ client.on('interactionCreate', async interaction => {
             }
 
             if (rank === 'officer') {
-                if (!leaderRole) return interaction.editReply('❌ Только Лидер может назначать Офицеров!');
+                if (!isLeader) return interaction.editReply('❌ Только Лидер может назначать Офицеров!');
                 await targetMember.roles.add(clanBaseRole);
                 await targetMember.roles.add(clanOfficerRole);
                 return interaction.editReply(`👑 ${targetMember} повышен до Офицера клана **${activeClanName}**.`);
@@ -312,7 +321,7 @@ client.on('interactionCreate', async interaction => {
             }
         } catch (err) {
             console.error(err);
-            return interaction.editReply('❌ Не удалось изменить роли/тайм-аут. Проверьте, что роль бота стоит ВЫШЕ всех клановых ролей.');
+            return interaction.editReply('❌ Не удалось выполнить действие. Проверьте, что роль бота стоит ВЫШЕ всех клановых ролей.');
         }
     }
 });
