@@ -99,7 +99,7 @@ client.once('ready', async () => {
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Слэш-команды обновлены!');
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error('❌ Ошибка регистрации команд:', e); }
 });
 
 client.on('interactionCreate', async interaction => {
@@ -248,6 +248,9 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
+// --- ЛОГИРОВАНИЕ ОШИБОК КЛИЕНТА ---
+client.on('error', err => console.error('❌ Client error:', err));
+
 // --- HTTP-ЗАГЛУШКА для Render ---
 const port = process.env.PORT || 8080;
 http.createServer((req, res) => {
@@ -257,4 +260,7 @@ http.createServer((req, res) => {
     console.log(`HTTP-заглушка слушает порт ${port}`);
 });
 
-client.login(process.env.TOKEN);
+// --- ЛОГИН В DISCORD с перехватом ошибки ---
+client.login(process.env.TOKEN).catch(err => {
+    console.error('❌ Ошибка входа в Discord:', err);
+});
