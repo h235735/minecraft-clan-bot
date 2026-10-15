@@ -1,29 +1,62 @@
 const { Client, GatewayIntentBits, PermissionFlagsBits, ChannelType, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const mongoose = require('mongoose');
+const { Pool } = require('pg');
 require('dotenv').config();
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
-// --- ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ ---
-mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('✅ Подключено к MongoDB'))
-    .catch(err => console.error('❌ Ошибка MongoDB:', err));
-
-const clanSchema = new mongoose.Schema({
-    userId: { type: String, required: true, unique: true },
-    clanName: String,
-    categoryId: String,
-    baseRoleId: String,
-    officerRoleId: String,
-    leaderRoleId: String
+// --- ПОДКЛЮЧЕНИЕ К POSTGRESQL (SUPABASE) ---
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
 });
-const Clan = mongoose.model('Clan', clanSchema);
 
-async function getClan(userId) { return await Clan.findOne({ userId }); }
-async function saveClan(userId, data) { return await Clan.findOneAndUpdate({ userId }, data, { upsert: true, new: true }); }
-async function deleteClan(userId) { return await Clan.findOneAndDelete({ userId }); }
+async function initDB() {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS clans (
+                user_id VARCHAR(255) PRIMARY KEY,
+                clan_name VARCHAR(255),
+                category_id VARCHAR(255),
+                base_role_id VARCHAR(255),
+                officer_role_id VARCHAR(255),
+                leader_role_id VARCHAR(255)
+            );
+        `);
+        console.log('✅ Таблица clans готова (PostgreSQL)');
+    } catch (err) {
+        console.error('❌ Ошибка инициализации БД:', err);
+    }
+}
+
+async function getClan(userId) {
+    const res = await pool.query('SELECT * FROM clans WHERE user_id = $1', [userId]);
+    return res.rows[0];
+}
+
+async function saveClan(userId, data) {
+    await pool.query(
+        `INSERT INTO clans (user_id, clan_name, category_id, base_role_id, officer_role_id, leader_role_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (user_id) DO UPDATE SET
+         clan_name = EXCLUDED.clan_name,
+         category_id = EXCLUDED.category_id,
+         base_role_id = EXCLUDED.base_role_id,
+         officer_role_id = EXCLUDED.officer_role_id,
+         leader_role_id = EXCLUDED.leader_role_id`,
+        [userId, data.clanName, data.categoryId, data.baseRoleId, data.officerRoleId, data.leaderRoleId]
+    );
+}
+
+async function deleteClan(userId) {
+    await pool.query('DELETE FROM clans WHERE user_id = $1', [userId]);
+}
+
+async function getAllClans() {
+    const res = await pool.query('SELECT * FROM clans');
+    return res.rows;
+}
 // --- КОНЕЦ БЛОКА БД ---
 
 const commands = [
@@ -59,6 +92,8 @@ const commands = [
 
 client.once('ready', async () => {
     console.log(`Бот запущен: ${client.user.tag}`);
+    await initDB();
+
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -130,13 +165,13 @@ client.on('interactionCreate', async interaction => {
         if (!myClan) return interaction.editReply('❌ У вас нет клана.');
         const newName = interaction.options.getString('новое_название');
         try {
-            const category = guild.channels.cache.get(myClan.categoryId);
+            const category = guild.channels.cache.get(myClan.category_id);
             if (category) await category.setName(`⛺ КЛАН: ${newName.toUpperCase()}`);
-            const br = guild.roles.cache.get(myClan.baseRoleId); if (br) await br.setName(newName);
-            const or = guild.roles.cache.get(myClan.officerRoleId); if (or) await or.setName(`Офицер: ${newName}`);
-            const lr = guild.roles.cache.get(myClan.leaderRoleId); if (lr) await lr.setName(`Лидер: ${newName}`);
-            myClan.clanName = newName;
-            await myClan.save();
+            const br = guild.roles.cache.get(myClan.base_role_id); if (br) await br.setName(newName);
+            const or = guild.roles.cache.get(myClan.officer_role_id); if (or) await or.setName(`Офицер: ${newName}`);
+            const lr = guild.roles.cache.get(myClan.leader_role_id); if (lr) await lr.setName(`Лидер: ${newName}`);
+
+            await pool.query('UPDATE clans SET clan_name = $1 WHERE user_id = $2', [newName, user.id]);
             return interaction.editReply(`📝 Клан переименован в **${newName}**!`);
         } catch (err) { console.error(err); return interaction.editReply('❌ Ошибка переименования.'); }
     }
@@ -147,13 +182,13 @@ client.on('interactionCreate', async interaction => {
         const myClan = await getClan(user.id);
         if (!myClan) return interaction.editReply('❌ У вас нет клана.');
         try {
-            const category = guild.channels.cache.get(myClan.categoryId);
+            const category = guild.channels.cache.get(myClan.category_id);
             if (category) {
                 const children = guild.channels.cache.filter(c => c.parentId === category.id);
                 for (const [, child] of children) await child.delete().catch(() => null);
                 await category.delete().catch(() => null);
             }
-            for (const id of [myClan.baseRoleId, myClan.officerRoleId, myClan.leaderRoleId]) {
+            for (const id of [myClan.base_role_id, myClan.officer_role_id, myClan.leader_role_id]) {
                 const role = guild.roles.cache.get(id);
                 if (role) await role.delete().catch(() => null);
             }
@@ -167,20 +202,19 @@ client.on('interactionCreate', async interaction => {
         const target = interaction.options.getMember('игрок');
         const rank = interaction.options.getString('ранг');
 
-        // Ищем клан по ролям автора
         let myClan = null;
-        const allClans = await Clan.find({});
+        const allClans = await getAllClans();
         for (const c of allClans) {
-            if (member.roles.cache.has(c.leaderRoleId) || member.roles.cache.has(c.officerRoleId)) {
+            if (member.roles.cache.has(c.leader_role_id) || member.roles.cache.has(c.officer_role_id)) {
                 myClan = c; break;
             }
         }
         if (!myClan) return interaction.reply({ content: '❌ Вы не Лидер и не Офицер.', ephemeral: true });
 
-        const isLeader = member.roles.cache.has(myClan.leaderRoleId);
-        const br = guild.roles.cache.get(myClan.baseRoleId);
-        const or = guild.roles.cache.get(myClan.officerRoleId);
-        const lr = guild.roles.cache.get(myClan.leaderRoleId);
+        const isLeader = member.roles.cache.has(myClan.leader_role_id);
+        const br = guild.roles.cache.get(myClan.base_role_id);
+        const or = guild.roles.cache.get(myClan.officer_role_id);
+        const lr = guild.roles.cache.get(myClan.leader_role_id);
 
         if (!br) return interaction.reply({ content: '❌ Роль клана удалена.', ephemeral: true });
 
@@ -188,12 +222,12 @@ client.on('interactionCreate', async interaction => {
         try {
             if (rank === 'member') {
                 await target.roles.add(br);
-                return interaction.editReply(`✅ ${target} — Боец клана **${myClan.clanName}**.`);
+                return interaction.editReply(`✅ ${target} — Боец клана **${myClan.clan_name}**.`);
             }
             if (rank === 'officer') {
                 if (!isLeader) return interaction.editReply('❌ Только Лидер может назначать Офицеров!');
                 await target.roles.add(br); await target.roles.add(or);
-                return interaction.editReply(`👑 ${target} — Офицер клана **${myClan.clanName}**.`);
+                return interaction.editReply(`👑 ${target} — Офицер клана **${myClan.clan_name}**.`);
             }
             if (rank === 'mute') {
                 if (target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя замутить Лидера.');
@@ -207,7 +241,7 @@ client.on('interactionCreate', async interaction => {
             if (rank === 'kick') {
                 if (target.roles.cache.has(lr.id)) return interaction.editReply('❌ Нельзя исключить Лидера.');
                 await target.roles.remove(br); if (or) await target.roles.remove(or);
-                return interaction.editReply(`🚪 ${target} исключён из клана **${myClan.clanName}**.`);
+                return interaction.editReply(`🚪 ${target} исключён из клана **${myClan.clan_name}**.`);
             }
         } catch (err) { console.error(err); return interaction.editReply('❌ Ошибка. Роль бота должна быть ВЫШЕ.'); }
     }
