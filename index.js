@@ -270,6 +270,13 @@ console.log('🔍 TOKEN содержит пробелы/переносы?', rawT
 console.log('🔍 DATABASE_URL начинается с', process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 30) + '...' : 'НЕТ URL');
 console.log('🔍 Попытка входа в Discord...');
 
+// --- REST-ТЕСТ ТОКЕНА (без WebSocket) ---
+const testRest = new REST({ version: '10' }).setToken(cleanToken);
+testRest.get(Routes.user('@me'))
+    .then(user => console.log('✅ Токен валиден. Бот:', user.username, '| ID:', user.id))
+    .catch(err => console.error('❌ Токен НЕ валиден:', err.message));
+
+// --- ЛОГИН С ТАЙМАУТОМ ---
 const loginTimeout = setTimeout(() => {
     console.error('❌ ТАЙМАУТ: client.login() не ответил за 30 секунд');
 }, 30000);
