@@ -242,3 +242,25 @@ client.on('interactionCreate', async interaction => {
             } 
             
             if (rank === 'officer') {
+                if (!leaderRole) {
+return interaction.editReply('❌ Только Лидер клана может назначать Офицеров!');
+}
+await targetMember.roles.add(clanBaseRole);
+await targetMember.roles.add(clanOfficerRole);
+return interaction.editReply(👑 Игрок ${targetMember} повышен до **Офицера** в клане **${activeClanName}**!);
+}
+if (rank === 'kick') {
+if (targetMember.roles.cache.has(clanLeaderRole.id)) {
+return interaction.editReply('❌ Вы не можете исключить Лидера клана!');
+}
+await targetMember.roles.remove(clanBaseRole);
+if (clanOfficerRole) await targetMember.roles.remove(clanOfficerRole);
+return interaction.editReply(🚪 Игрок ${targetMember} полностью исключен из клана **${activeClanName}**.);
+}
+} catch (err) {
+console.error(err);
+return interaction.editReply('❌ Не удалось изменить роли пользователя. Убедитесь, что роль бота находится ВЫШЕ клановых ролей.');
+}
+}
+});
+client.login(process.env.TOKEN);
