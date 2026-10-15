@@ -95,7 +95,7 @@ client.once('ready', async () => {
     console.log(`Бот запущен: ${client.user.tag}`);
     await initDB();
 
-    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN.trim());
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Слэш-команды обновлены!');
@@ -261,13 +261,26 @@ http.createServer((req, res) => {
 });
 
 // --- ДИАГНОСТИКА И ЛОГИН В DISCORD ---
-console.log('🔍 Проверка: TOKEN начинается с', process.env.TOKEN ? process.env.TOKEN.substring(0, 10) + '...' : 'НЕТ ТОКЕНА');
-console.log('🔍 Проверка: DATABASE_URL начинается с', process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 30) + '...' : 'НЕТ URL');
+const rawToken = process.env.TOKEN || '';
+const cleanToken = rawToken.trim();
+console.log('🔍 TOKEN длина:', rawToken.length, '→ после trim:', cleanToken.length);
+console.log('🔍 TOKEN начинается с', cleanToken.substring(0, 10) + '...');
+console.log('🔍 TOKEN заканчивается на', cleanToken.substring(cleanToken.length - 5));
+console.log('🔍 TOKEN содержит пробелы/переносы?', rawToken !== cleanToken ? 'ДА' : 'НЕТ');
+console.log('🔍 DATABASE_URL начинается с', process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 30) + '...' : 'НЕТ URL');
 console.log('🔍 Попытка входа в Discord...');
 
-client.login(process.env.TOKEN)
-    .then(() => console.log('🔍 client.login() завершился успешно'))
+const loginTimeout = setTimeout(() => {
+    console.error('❌ ТАЙМАУТ: client.login() не ответил за 30 секунд');
+}, 30000);
+
+client.login(cleanToken)
+    .then(() => {
+        clearTimeout(loginTimeout);
+        console.log('🔍 client.login() завершился успешно');
+    })
     .catch(err => {
+        clearTimeout(loginTimeout);
         console.error('❌ Ошибка входа в Discord:', err.message);
         console.error('❌ Код ошибки:', err.code);
     });
