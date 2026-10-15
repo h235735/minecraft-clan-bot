@@ -260,7 +260,14 @@ http.createServer((req, res) => {
     console.log(`HTTP-заглушка слушает порт ${port}`);
 });
 
-// --- ЛОГИН В DISCORD с перехватом ошибки ---
-client.login(process.env.TOKEN).catch(err => {
-    console.error('❌ Ошибка входа в Discord:', err);
-});
+// --- ДИАГНОСТИКА И ЛОГИН В DISCORD ---
+console.log('🔍 Проверка: TOKEN начинается с', process.env.TOKEN ? process.env.TOKEN.substring(0, 10) + '...' : 'НЕТ ТОКЕНА');
+console.log('🔍 Проверка: DATABASE_URL начинается с', process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 30) + '...' : 'НЕТ URL');
+console.log('🔍 Попытка входа в Discord...');
+
+client.login(process.env.TOKEN)
+    .then(() => console.log('🔍 client.login() завершился успешно'))
+    .catch(err => {
+        console.error('❌ Ошибка входа в Discord:', err.message);
+        console.error('❌ Код ошибки:', err.code);
+    });
