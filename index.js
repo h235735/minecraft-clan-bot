@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, PermissionFlagsBits, ChannelType, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
+const http = require('http');
 require('dotenv').config();
 
 const client = new Client({
@@ -270,7 +271,6 @@ client.on('interactionCreate', async interaction => {
 
         const myClan = clanData[ownerId];
         const isLeader = member.roles.cache.has(myClan.leaderRoleId);
-        const isOfficer = member.roles.cache.has(myClan.officerRoleId);
 
         const clanBaseRole = guild.roles.cache.get(myClan.baseRoleId);
         const clanOfficerRole = guild.roles.cache.get(myClan.officerRoleId);
@@ -280,7 +280,6 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: '❌ Основная роль клана была удалена. Обратитесь к администрации.', ephemeral: true });
         }
 
-        // Отображаемое имя клана — из базы бота
         const activeClanName = myClan.clanName || clanBaseRole.name;
 
         await interaction.deferReply();
@@ -324,6 +323,15 @@ client.on('interactionCreate', async interaction => {
             return interaction.editReply('❌ Не удалось выполнить действие. Проверьте, что роль бота стоит ВЫШЕ всех клановых ролей.');
         }
     }
+});
+
+// --- HTTP-ЗАГЛУШКА (нужна для Fly.io, Render и т.п.) ---
+const port = process.env.PORT || 8080;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running!');
+}).listen(port, () => {
+    console.log(`HTTP-заглушка слушает порт ${port}`);
 });
 
 client.login(process.env.TOKEN);
