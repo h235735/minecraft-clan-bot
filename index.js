@@ -8,7 +8,6 @@ const client = new Client({
 
 const DATA_FILE = './clans.json';
 
-// Функция загрузки данных о созданных кланах
 function loadClanData() {
     if (!fs.existsSync(DATA_FILE)) return {};
     try {
@@ -18,12 +17,10 @@ function loadClanData() {
     }
 }
 
-// Функция保存ения данных
 function saveClanData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// Регистрация всех слэш-команд
 const commands = [
     new SlashCommandBuilder()
         .setName('создатьклан')
@@ -32,7 +29,7 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('переименоватьклан')
-        .setDescription('Изменить название вашего клана, ролей и категории (Можно использовать когда угодно)')
+        .setDescription('Изменить название вашего клана, ролей и категории')
         .addStringOption(opt => opt.setName('новое_название').setDescription('Новое название вашего клана').setRequired(true)),
 
     new SlashCommandBuilder()
@@ -70,7 +67,7 @@ client.on('interactionCreate', async interaction => {
     const { commandName, guild, member, user } = interaction;
     let clanData = loadClanData();
 
-    // --- 1. КОМАНДА: СОЗДАТЬ КЛАН ---
+    // --- 1. СОЗДАТЬ КЛАН ---
     if (commandName === 'создатьклан') {
         await interaction.deferReply({ ephemeral: true });
 
@@ -94,23 +91,23 @@ client.on('interactionCreate', async interaction => {
                 permissionOverwrites: [
                     { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
                     { id: baseRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-                    { 
-                        id: officerRole.id, 
+                    {
+                        id: officerRole.id,
                         allow: [
-                            PermissionFlagsBits.ViewChannel, 
+                            PermissionFlagsBits.ViewChannel,
                             PermissionFlagsBits.SendMessages,
                             PermissionFlagsBits.ManageChannels,
                             PermissionFlagsBits.ManageMessages
-                        ] 
+                        ]
                     },
-                    { 
-                        id: leaderRole.id, 
+                    {
+                        id: leaderRole.id,
                         allow: [
-                            PermissionFlagsBits.ViewChannel, 
+                            PermissionFlagsBits.ViewChannel,
                             PermissionFlagsBits.SendMessages,
                             PermissionFlagsBits.ManageChannels,
                             PermissionFlagsBits.ManageMessages
-                        ] 
+                        ]
                     }
                 ]
             });
@@ -137,7 +134,7 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // --- 2. КОМАНДА: ПЕРЕИМЕНОВАТЬ КЛАН ---
+    // --- 2. ПЕРЕИМЕНОВАТЬ КЛАН ---
     if (commandName === 'переименоватьклан') {
         await interaction.deferReply({ ephemeral: true });
 
@@ -173,7 +170,7 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // --- 3. КОМАНДА: УДАЛИТЬ КЛАН ---
+    // --- 3. УДАЛИТЬ КЛАН ---
     if (commandName === 'удалитьклан') {
         await interaction.deferReply({ ephemeral: true });
 
@@ -209,7 +206,7 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // --- 4. КОМАНДА: УПРАВЛЕНИЕ УЧАСТНИКАМИ ---
+    // --- 4. УПРАВЛЕНИЕ УЧАСТНИКАМИ ---
     if (commandName === 'клан') {
         const targetMember = interaction.options.getMember('игрок');
         const rank = interaction.options.getString('ранг');
@@ -222,9 +219,12 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: '❌ Вы не являетесь Лидером или Офицером какого-либо клана!', ephemeral: true });
         }
 
-        const activeClanName = leaderRole ? leaderRole.name.replace('Лидер: ', '') : officerRole.name.replace('Офицер: ', '');
+        const activeClanName = leaderRole
+            ? leaderRole.name.replace('Лидер: ', '')
+            : officerRole.name.replace('Офицер: ', '');
+
         const guildRoles = guild.roles.cache;
-        
+
         const clanBaseRole = guildRoles.find(r => r.name === activeClanName);
         const clanOfficerRole = guildRoles.find(r => r.name === `Офицер: ${activeClanName}`);
         const clanLeaderRole = guildRoles.find(r => r.name === `Лидер: ${activeClanName}`);
@@ -239,28 +239,30 @@ client.on('interactionCreate', async interaction => {
             if (rank === 'member') {
                 await targetMember.roles.add(clanBaseRole);
                 return interaction.editReply(`✅ Игрок ${targetMember} успешно принят в клан **${activeClanName}** как Боец!`);
-            } 
-            
+            }
+
             if (rank === 'officer') {
                 if (!leaderRole) {
-return interaction.editReply('❌ Только Лидер клана может назначать Офицеров!');
-}
-await targetMember.roles.add(clanBaseRole);
-await targetMember.roles.add(clanOfficerRole);
-return interaction.editReply(👑 Игрок ${targetMember} повышен до **Офицера** в клане **${activeClanName}**!);
-}
-if (rank === 'kick') {
-if (targetMember.roles.cache.has(clanLeaderRole.id)) {
-return interaction.editReply('❌ Вы не можете исключить Лидера клана!');
-}
-await targetMember.roles.remove(clanBaseRole);
-if (clanOfficerRole) await targetMember.roles.remove(clanOfficerRole);
-return interaction.editReply(🚪 Игрок ${targetMember} полностью исключен из клана **${activeClanName}**.);
-}
-} catch (err) {
-console.error(err);
-return interaction.editReply('❌ Не удалось изменить роли пользователя. Убедитесь, что роль бота находится ВЫШЕ клановых ролей.');
-}
-}
+                    return interaction.editReply('❌ Только Лидер клана может назначать Офицеров!');
+                }
+                await targetMember.roles.add(clanBaseRole);
+                await targetMember.roles.add(clanOfficerRole);
+                return interaction.editReply(`👑 Игрок ${targetMember} повышен до **Офицера** в клане **${activeClanName}**!`);
+            }
+
+            if (rank === 'kick') {
+                if (targetMember.roles.cache.has(clanLeaderRole.id)) {
+                    return interaction.editReply('❌ Вы не можете исключить Лидера клана!');
+                }
+                await targetMember.roles.remove(clanBaseRole);
+                if (clanOfficerRole) await targetMember.roles.remove(clanOfficerRole);
+                return interaction.editReply(`🚪 Игрок ${targetMember} полностью исключен из клана **${activeClanName}**.`);
+            }
+        } catch (err) {
+            console.error(err);
+            return interaction.editReply('❌ Не удалось изменить роли пользователя. Убедитесь, что роль бота находится ВЫШЕ клановых ролей.');
+        }
+    }
 });
+
 client.login(process.env.TOKEN);
