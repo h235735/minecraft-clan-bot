@@ -18,7 +18,7 @@ function loadClanData() {
     }
 }
 
-// Функция сохранения данных
+// Функция保存ения данных
 function saveClanData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
@@ -137,11 +137,10 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // --- 2. КОМАНДА: ПЕРЕИМЕНОВАТЬ КЛАН (В любое время) ---
+    // --- 2. КОМАНДА: ПЕРЕИМЕНОВАТЬ КЛАН ---
     if (commandName === 'переименоватьклан') {
         await interaction.deferReply({ ephemeral: true });
 
-        // Проверка владения кланом
         if (!clanData[user.id]) {
             return interaction.editReply('❌ У вас нет созданного клана, который можно переименовать.');
         }
@@ -150,13 +149,11 @@ client.on('interactionCreate', async interaction => {
         const newClanName = interaction.options.getString('новое_название');
 
         try {
-            // Переименовываем категорию в Discord
             const category = guild.channels.cache.get(myClan.categoryId);
             if (category) {
                 await category.setName(`⛺ КЛАН: ${newClanName.toUpperCase()}`);
             }
 
-            // Переименовываем роли в Discord
             const baseRole = guild.roles.cache.get(myClan.baseRoleId);
             if (baseRole) await baseRole.setName(newClanName);
 
@@ -166,11 +163,10 @@ client.on('interactionCreate', async interaction => {
             const leaderRole = guild.roles.cache.get(myClan.leaderRoleId);
             if (leaderRole) await leaderRole.setName(`Лидер: ${newClanName}`);
 
-            // Обновляем название в базе данных бота
             clanData[user.id].clanName = newClanName;
             saveClanData(clanData);
 
-            return interaction.editReply(`📝 Ваш клан успешно переименован в **${newClanName}**! Категория и все связанные роли обновлены.`);
+            return interaction.editReply(`📝 Ваш клан успешно переименован в **${newClanName}**!`);
         } catch (err) {
             console.error(err);
             return interaction.editReply('❌ Не удалось переименовать клан. Убедитесь, что роль бота находится ВЫШЕ клановых ролей.');
@@ -206,7 +202,7 @@ client.on('interactionCreate', async interaction => {
             delete clanData[user.id];
             saveClanData(clanData);
 
-            return interaction.editReply('🗑️ Ваш клан, его роли и категория были полностью удалены. Теперь вы можете создать новый.');
+            return interaction.editReply('🗑️ Ваш клан, его роли и категория были полностью удалены.');
         } catch (err) {
             console.error(err);
             return interaction.editReply('❌ Ошибка при удалении клана.');
@@ -234,3 +230,15 @@ client.on('interactionCreate', async interaction => {
         const clanLeaderRole = guildRoles.find(r => r.name === `Лидер: ${activeClanName}`);
 
         if (!clanBaseRole) {
+            return interaction.reply({ content: '❌ Не удалось найти роли вашего клана.', ephemeral: true });
+        }
+
+        await interaction.deferReply();
+
+        try {
+            if (rank === 'member') {
+                await targetMember.roles.add(clanBaseRole);
+                return interaction.editReply(`✅ Игрок ${targetMember} успешно принят в клан **${activeClanName}** как Боец!`);
+            } 
+            
+            if (rank === 'officer') {
