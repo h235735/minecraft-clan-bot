@@ -14,13 +14,19 @@ process.on('uncaughtException', err => console.error('❌ uncaughtException:', e
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
-    rest: { timeout: 30000 }
+    rest: { timeout: 30000 },
+    allowedMentions: { parse: [] }
 });
 
 // --- ПОДКЛЮЧЕНИЕ К POSTGRESQL (SUPABASE) ---
+// SSL: по умолчанию включён (нужен для Supabase и большинства облачных БД).
+// Для БД на localhost отключается сам; можно задать явно: DATABASE_SSL=false / true.
+const dbUrl = process.env.DATABASE_URL || '';
+const isLocalDb = /@(localhost|127\.0\.0\.1|\[::1\])[:\/]/.test(dbUrl);
+const useSSL = process.env.DATABASE_SSL ? process.env.DATABASE_SSL !== 'false' : !isLocalDb;
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    connectionString: dbUrl,
+    ssl: useSSL ? { rejectUnauthorized: false } : false
 });
 pool.on('error', err => console.error('❌ Ошибка пула PostgreSQL:', err.message));
 
@@ -71,6 +77,66 @@ async function getAllClans() {
 }
 // --- КОНЕЦ БЛОКА БД ---
 
+// --- ЗАЩИТА ОТ ГОНОК: пока команда пользователя выполняется, вторая не запускается ---
+const busyUsers = new Set();
+
+// --- ПРОВЕРКА НАЗВАНИЯ КЛАНА ---
+// ownRoleIds — роли самого клана (при переименовании они не считаются «занятыми»)
+async function validateClanName(raw, guild, exceptUserId, ownRoleIds = []) {
+    const name = (raw || '').replace(/\s+/g, ' ').trim();
+    if (name.length < 2 || name.length > 32) {
+        return { error: 'Название должно быть от 2 до 32 символов.' };
+    }
+    if (!/^[\p{L}\p{N} _-]+$/u.test(name)) {
+        return { error: 'Допустимы только буквы, цифры, пробел, «_» и «-».' };
+    }
+    const lower = name.toLowerCase();
+
+    const clans = await getAllClans();
+    if (clans.some(c => c.user_id !== exceptUserId && (c.clan_name || '').toLowerCase() === lower)) {
+        return { error: 'Клан с таким названием уже существует.' };
+    }
+
+    // Нельзя назвать клан так же, как уже существующая роль (в т.ч. админская)
+    const taken = new Set([lower, `офицер: ${lower}`, `лидер: ${lower}`]);
+    if (guild.roles.cache.some(r => !ownRoleIds.includes(r.id) && taken.has(r.name.toLowerCase()))) {
+        return { error: 'Роль с таким названием уже есть на сервере.' };
+    }
+    return { name };
+}
+
+// Удаление, которое честно сообщает, получилось ли оно.
+// 10003 / 10011 — «канал/роль уже не существует», это не ошибка.
+async function safeDelete(obj) {
+    try {
+        await obj.delete();
+        return true;
+    } catch (e) {
+        if (e.code === 10003 || e.code === 10011) return true;
+        console.error('⚠️ Не удалось удалить:', e.message);
+        return false;
+    }
+}
+
+// Одноразовая «починка» кланов, созданных старой версией бота:
+// у ролей лидеров были серверные права. Теперь права есть только в категории клана.
+async function stripLeaderRolePermissions() {
+    try {
+        const clans = await getAllClans();
+        for (const c of clans) {
+            for (const guild of client.guilds.cache.values()) {
+                const role = guild.roles.cache.get(c.leader_role_id);
+                if (role && role.permissions.bitfield !== 0n) {
+                    await role.setPermissions(0n, 'Права лидера действуют только в категории клана');
+                    console.log(`🔧 Сняты серверные права с роли «${role.name}»`);
+                }
+            }
+        }
+    } catch (e) {
+        console.error('⚠️ Не удалось почистить права лидеров:', e.message);
+    }
+}
+
 const commands = [
     new SlashCommandBuilder()
         .setName('создатьклан')
@@ -106,6 +172,7 @@ const commands = [
 client.once('clientReady', async () => {
     console.log(`✅ Бот запущен: ${client.user.tag}`);
     await initDB();
+    await stripLeaderRolePermissions();
 
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     try {
@@ -127,20 +194,25 @@ client.on('interactionCreate', async interaction => {
     // --- СОЗДАТЬ КЛАН ---
     if (commandName === 'создатьклан') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (busyUsers.has(user.id)) return interaction.editReply('⏳ Предыдущая команда ещё выполняется.');
+        busyUsers.add(user.id);
+        const created = []; // всё созданное по ходу дела — для отката при ошибке
         try {
             const existing = await getClan(user.id);
             if (existing) return interaction.editReply('❌ Вы уже создали клан! Сначала `/удалитьклан`.');
 
-            const clanName = interaction.options.getString('название');
+            const check = await validateClanName(interaction.options.getString('название'), guild, user.id);
+            if (check.error) return interaction.editReply(`❌ ${check.error}`);
+            const clanName = check.name;
 
-            const leaderPerms = [
-                PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages,
-                PermissionFlagsBits.ManageRoles, PermissionFlagsBits.ModerateMembers
-            ];
+            // Роли создаются БЕЗ серверных прав. Всё, что нужно лидеру и офицерам,
+            // выдаётся только внутри категории клана (permissionOverwrites ниже).
             const baseRole = await guild.roles.create({ name: clanName });
+            created.push(baseRole);
             const officerRole = await guild.roles.create({ name: `Офицер: ${clanName}`, color: '#e67e22' });
-            const leaderRole = await guild.roles.create({ name: `Лидер: ${clanName}`, color: '#d35400', permissions: leaderPerms });
+            created.push(officerRole);
+            const leaderRole = await guild.roles.create({ name: `Лидер: ${clanName}`, color: '#d35400' });
+            created.push(leaderRole);
 
             const botHighest = guild.members.me.roles.highest.position;
             try {
@@ -178,7 +250,9 @@ client.on('interactionCreate', async interaction => {
                     }
                 ]
             });
-            await guild.channels.create({ name: 'клановый-чат', type: ChannelType.GuildText, parent: category.id });
+            created.push(category);
+            const chat = await guild.channels.create({ name: 'клановый-чат', type: ChannelType.GuildText, parent: category.id });
+            created.push(chat);
 
             await saveClan(user.id, {
                 clanName, categoryId: category.id,
@@ -188,54 +262,88 @@ client.on('interactionCreate', async interaction => {
             return interaction.editReply(`✅ Клан **${clanName}** создан! Вы — Лидер.`);
         } catch (err) {
             console.error(err);
-            return interaction.editReply('❌ Ошибка. Проверьте, что роль бота ВЫШЕ всех ролей и у неё есть права на управление ролями/каналами.');
+            // Откат: удаляем всё созданное в обратном порядке (канал → категория → роли)
+            for (const obj of created.reverse()) await safeDelete(obj);
+            return interaction.editReply('❌ Ошибка, всё созданное откачено. Проверьте, что роль бота ВЫШЕ всех ролей и у неё есть права на управление ролями/каналами.');
+        } finally {
+            busyUsers.delete(user.id);
         }
     }
 
     // --- ПЕРЕИМЕНОВАТЬ ---
     if (commandName === 'переименоватьклан') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (busyUsers.has(user.id)) return interaction.editReply('⏳ Предыдущая команда ещё выполняется.');
+        busyUsers.add(user.id);
+        const done = []; // [объект, старое имя] — чтобы откатить при ошибке
         try {
             const myClan = await getClan(user.id);
             if (!myClan) return interaction.editReply('❌ У вас нет клана.');
-            const newName = interaction.options.getString('новое_название');
 
-            const category = guild.channels.cache.get(myClan.category_id);
-            if (category) await category.setName(`⛺ КЛАН: ${newName.toUpperCase()}`);
-            const br = guild.roles.cache.get(myClan.base_role_id); if (br) await br.setName(newName);
-            const or = guild.roles.cache.get(myClan.officer_role_id); if (or) await or.setName(`Офицер: ${newName}`);
-            const lr = guild.roles.cache.get(myClan.leader_role_id); if (lr) await lr.setName(`Лидер: ${newName}`);
+            const ownRoleIds = [myClan.base_role_id, myClan.officer_role_id, myClan.leader_role_id];
+            const check = await validateClanName(interaction.options.getString('новое_название'), guild, user.id, ownRoleIds);
+            if (check.error) return interaction.editReply(`❌ ${check.error}`);
+            const newName = check.name;
+
+            const steps = [
+                [guild.channels.cache.get(myClan.category_id), `⛺ КЛАН: ${newName.toUpperCase()}`],
+                [guild.roles.cache.get(myClan.base_role_id), newName],
+                [guild.roles.cache.get(myClan.officer_role_id), `Офицер: ${newName}`],
+                [guild.roles.cache.get(myClan.leader_role_id), `Лидер: ${newName}`]
+            ];
+            for (const [obj, name] of steps) {
+                if (!obj) continue;
+                const old = obj.name;
+                await obj.setName(name);
+                done.push([obj, old]);
+            }
 
             await pool.query('UPDATE clans SET clan_name = $1 WHERE user_id = $2', [newName, user.id]);
             return interaction.editReply(`📝 Клан переименован в **${newName}**!`);
         } catch (err) {
             console.error(err);
-            return interaction.editReply('❌ Ошибка переименования.');
+            for (const [obj, old] of done.reverse()) await obj.setName(old).catch(() => null);
+            return interaction.editReply('❌ Ошибка переименования. Изменения откачены.');
+        } finally {
+            busyUsers.delete(user.id);
         }
     }
 
     // --- УДАЛИТЬ ---
     if (commandName === 'удалитьклан') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (busyUsers.has(user.id)) return interaction.editReply('⏳ Предыдущая команда ещё выполняется.');
+        busyUsers.add(user.id);
         try {
             const myClan = await getClan(user.id);
             if (!myClan) return interaction.editReply('❌ У вас нет клана.');
 
+            let failed = 0;
             const category = guild.channels.cache.get(myClan.category_id);
             if (category) {
                 const children = guild.channels.cache.filter(c => c.parentId === category.id);
-                for (const [, child] of children) await child.delete().catch(() => null);
-                await category.delete().catch(() => null);
+                let childFailed = 0;
+                for (const [, child] of children) if (!(await safeDelete(child))) childFailed++;
+                failed += childFailed;
+                // Категорию удаляем только если каналы внутри удалились: иначе они осиротеют
+                if (childFailed === 0 && !(await safeDelete(category))) failed++;
+                else if (childFailed > 0) failed++;
             }
             for (const id of [myClan.base_role_id, myClan.officer_role_id, myClan.leader_role_id]) {
                 const role = guild.roles.cache.get(id);
-                if (role) await role.delete().catch(() => null);
+                if (role && !(await safeDelete(role))) failed++;
+            }
+
+            if (failed > 0) {
+                return interaction.editReply(`⚠️ Удалилось не всё (ошибок: ${failed}), клан сохранён. Проверьте, что роль бота выше ролей клана, и повторите \`/удалитьклан\`.`);
             }
             await deleteClan(user.id);
             return interaction.editReply('🗑️ Клан полностью удалён.');
         } catch (err) {
             console.error(err);
             return interaction.editReply('❌ Ошибка удаления.');
+        } finally {
+            busyUsers.delete(user.id);
         }
     }
 
@@ -336,24 +444,28 @@ client.on('interactionCreate', async interaction => {
 // --- ЛОГИРОВАНИЕ СОБЫТИЙ КЛИЕНТА (ОТЛАДКА) ---
 client.on('error', err => console.error('❌ Client error:', err));
 client.on('warn', m => console.warn('[WARN]', m));
-client.on('debug', m => {
-    // Токен в debug-логах discord.js скрывается, но на всякий случай фильтруем
-    console.log('[DEBUG]', TOKEN ? m.split(TOKEN).join('***') : m);
-});
+if (process.env.DEBUG === '1') {
+    client.on('debug', m => {
+        // Токен в debug-логах discord.js скрывается, но на всякий случай фильтруем
+        console.log('[DEBUG]', TOKEN ? m.split(TOKEN).join('***') : m);
+    });
+}
 client.on('shardError', e => console.error('[SHARD ERROR]', e));
 client.on('shardDisconnect', (ev, id) => console.error('[SHARD DISCONNECT]', id, 'код:', ev.code));
 client.on('shardReconnecting', id => console.warn('[SHARD RECONNECTING]', id));
 client.rest.on('rateLimited', info => console.warn('[RATE LIMIT]', info));
 client.rest.on('invalidRequestWarning', i => console.warn('[INVALID REQ]', i));
 
-// --- HTTP-ЗАГЛУШКА для Render ---
-const port = process.env.PORT || 8080;
-http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot is running!');
-}).listen(port, () => {
-    console.log(`HTTP-заглушка слушает порт ${port}`);
-});
+// --- HTTP-ЗАГЛУШКА (только для хостингов, которые требуют открытый порт: Render и т.п.) ---
+// Запускается, только если задана переменная PORT. На своём сервере её не задавайте.
+if (process.env.PORT) {
+    http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('Bot is running!');
+    }).listen(process.env.PORT, () => {
+        console.log(`HTTP-заглушка слушает порт ${process.env.PORT}`);
+    });
+}
 
 // --- ДИАГНОСТИКА (без утечки секретов) ---
 console.log('🔍 Node:', process.version);
@@ -362,20 +474,25 @@ console.log('🔍 TOKEN содержит кавычки?', /["']/.test(TOKEN) ? 
 console.log('🔍 DATABASE_URL задан?', process.env.DATABASE_URL ? 'ДА' : 'НЕТ');
 
 if (!TOKEN) {
-    console.error('❌ Переменная TOKEN не задана. Добавь её в Environment на Render.');
+    console.error('❌ Переменная TOKEN не задана. Добавь её в файл .env или в переменные окружения хоста.');
+    process.exit(1);
+}
+if (!process.env.DATABASE_URL) {
+    console.error('❌ Переменная DATABASE_URL не задана. Добавь её в файл .env или в переменные окружения хоста.');
     process.exit(1);
 }
 
-// --- ТЕСТ СЕТИ ДО DISCORD ---
-fetch('https://discord.com/api/v10/gateway', { signal: AbortSignal.timeout(10000) })
-    .then(r => console.log('🌐 Gateway HTTP статус:', r.status))
-    .catch(e => console.error('🌐 Нет доступа к Discord:', e.message));
+// --- ТЕСТЫ СЕТИ И ТОКЕНА (только при DEBUG=1) ---
+if (process.env.DEBUG === '1') {
+    fetch('https://discord.com/api/v10/gateway', { signal: AbortSignal.timeout(10000) })
+        .then(r => console.log('🌐 Gateway HTTP статус:', r.status))
+        .catch(e => console.error('🌐 Нет доступа к Discord:', e.message));
 
-// --- REST-ТЕСТ ТОКЕНА (без WebSocket) ---
-new REST({ version: '10', timeout: 15000 }).setToken(TOKEN)
-    .get(Routes.user('@me'))
-    .then(u => console.log('✅ Токен валиден. Бот:', u.username, '| ID:', u.id))
-    .catch(err => console.error('❌ Токен НЕ валиден / нет ответа:', err.message));
+    new REST({ version: '10', timeout: 15000 }).setToken(TOKEN)
+        .get(Routes.user('@me'))
+        .then(u => console.log('✅ Токен валиден. Бот:', u.username, '| ID:', u.id))
+        .catch(err => console.error('❌ Токен НЕ валиден / нет ответа:', err.message));
+}
 
 // --- ЛОГИН С ТАЙМАУТОМ ---
 console.log('🔍 Попытка входа в Discord...');
